@@ -11,9 +11,13 @@ pyparsing
 importlib_metadata
 
 xformers == 0.0.24
-faiss-gpu
 pandas
 prettytable
 pytorch-lightning
 pytorch-metric-learning
 torchmetrics
+gradio
+trimesh
+opencv-python
+scipy
+matplotlib

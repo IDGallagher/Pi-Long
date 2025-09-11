@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <iostream>
+#include <cstdint>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
@@ -33,12 +34,12 @@ std::vector<torch::Tensor> solve_system(torch::Tensor J_Ginv_i, torch::Tensor J_
   const torch::Device device = res.device();
   J_Ginv_i = J_Ginv_i.to(torch::kCPU);
   J_Ginv_j = J_Ginv_j.to(torch::kCPU);
-  ii = ii.to(torch::kCPU);
-  jj = jj.to(torch::kCPU);
+  ii = ii.to(torch::kCPU, torch::kLong);
+  jj = jj.to(torch::kCPU, torch::kLong);
   res = res.clone().to(torch::kCPU);
 
   const int r = res.size(0);
-  const int n = std::max(ii.max().item<long>(), jj.max().item<long>()) + 1;
+  const int64_t n = std::max(ii.max().item<int64_t>(), jj.max().item<int64_t>()) + 1;
 
   res.resize_({r*7});
   float *res_ptr = res.data_ptr<float>();
@@ -48,14 +49,14 @@ std::vector<torch::Tensor> solve_system(torch::Tensor J_Ginv_i, torch::Tensor J_
   std::vector<T> tripletList;
   tripletList.reserve(r*7*7*2);
 
-  auto ii_acc = ii.accessor<long,1>();
-  auto jj_acc = jj.accessor<long,1>();
+  auto ii_acc = ii.accessor<int64_t,1>();
+  auto jj_acc = jj.accessor<int64_t,1>();
   auto J_Ginv_i_acc = J_Ginv_i.accessor<float,3>();
   auto J_Ginv_j_acc = J_Ginv_j.accessor<float,3>();
 
   for (int x=0; x<r; x++){
-    const int i = ii_acc[x];
-    const int j = jj_acc[x];
+    const int i = static_cast<int>(ii_acc[x]);
+    const int j = static_cast<int>(jj_acc[x]);
     for (int k=0; k<7; k++){
       for (int l=0; l<7; l++){
         if (i == j)

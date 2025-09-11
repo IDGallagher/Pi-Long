@@ -68,7 +68,7 @@ class LongSeqResult:
         self.all_camera_poses = []
 
 class Pi_Long:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(self, image_dir, save_dir, config, preloaded_model=None, keep_model_loaded=False):
         self.config = config
 
         self.chunk_size = self.config['Model']['chunk_size']
@@ -99,11 +99,16 @@ class Pi_Long:
 
         print('Loading model...')
 
-        self.model = Pi3().to(self.device).eval()
-        _URL = self.config['Weights']['Pi3']
-        from safetensors.torch import load_file
-        weight = load_file(_URL)
-        self.model.load_state_dict(weight, strict=False)
+        self.keep_model_loaded = bool(keep_model_loaded)
+        if preloaded_model is not None:
+            self.model = preloaded_model.to(self.device).eval()
+            print('Using preloaded Pi3 model')
+        else:
+            self.model = Pi3().to(self.device).eval()
+            _URL = self.config['Weights']['Pi3']
+            from safetensors.torch import load_file
+            weight = load_file(_URL)
+            self.model.load_state_dict(weight, strict=False)
 
         self.skyseg_session = None
 
@@ -260,8 +265,9 @@ class Pi_Long:
             self.process_single_chunk(self.chunk_indices[chunk_idx], chunk_idx=chunk_idx)
             torch.cuda.empty_cache()
 
-        del self.model # Save GPU Memory
-        torch.cuda.empty_cache()
+        if not self.keep_model_loaded:
+            del self.model # Save GPU Memory
+            torch.cuda.empty_cache()
 
         print("Aligning all the chunks...")
         for chunk_idx in range(len(self.chunk_indices)-1):
@@ -385,32 +391,72 @@ class Pi_Long:
 
         print('Apply alignment')
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
-        for chunk_idx in range(len(self.chunk_indices)-1):
-            print(f'Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})')
-            s, R, t = self.sim3_list[chunk_idx]
-            
-            chunk_data = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"), allow_pickle=True).item()
-            
-            chunk_data['points'] = apply_sim3_direct(chunk_data['points'], s, R, t)
-            
-            aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
-            np.save(aligned_path, chunk_data)
-            
-            if chunk_idx == 0:
-                chunk_data_first = np.load(os.path.join(self.result_unaligned_dir, f"chunk_0.npy"), allow_pickle=True).item()
-                np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
-            
-            aligned_chunk_data = np.load(os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item() if chunk_idx > 0 else chunk_data_first
-            
-            points = aligned_chunk_data['points'].reshape(-1, 3)
-            colors = (aligned_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
-            confs = aligned_chunk_data['conf'].reshape(-1)
-            ply_path = os.path.join(self.pcd_dir, f'{chunk_idx}_pcd.ply')
+        
+        # If there is only one chunk, export its point cloud directly
+        if len(self.chunk_indices) == 1:
+            single_chunk = np.load(os.path.join(self.result_unaligned_dir, f"chunk_0.npy"), allow_pickle=True).item()
+            points = single_chunk['points'].reshape(-1, 3)
+            colors = (single_chunk['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+            confs = single_chunk['conf'].reshape(-1)
+            ply_path = os.path.join(self.pcd_dir, '0_pcd.ply')
+            print(f"Exporting single-chunk PLY to {ply_path}")
             save_confident_pointcloud_batch(
-                points=points,              # shape: (H, W, 3)
-                colors=colors,              # shape: (H, W, 3)
-                confs=confs,          # shape: (H, W)
+                points=points,
+                colors=colors,
+                confs=confs,
                 output_path=ply_path,
+                conf_threshold=np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef'],
+                sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio']
+            )
+        else:
+            for chunk_idx in range(len(self.chunk_indices)-1):
+                print(f'Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})')
+                s, R, t = self.sim3_list[chunk_idx]
+                
+                chunk_data = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"), allow_pickle=True).item()
+                
+                chunk_data['points'] = apply_sim3_direct(chunk_data['points'], s, R, t)
+                
+                aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
+                np.save(aligned_path, chunk_data)
+                
+                if chunk_idx == 0:
+                    chunk_data_first = np.load(os.path.join(self.result_unaligned_dir, f"chunk_0.npy"), allow_pickle=True).item()
+                    np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
+                
+                aligned_chunk_data = np.load(os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item() if chunk_idx > 0 else chunk_data_first
+                
+                points = aligned_chunk_data['points'].reshape(-1, 3)
+                colors = (aligned_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+                confs = aligned_chunk_data['conf'].reshape(-1)
+                ply_path = os.path.join(self.pcd_dir, f'{chunk_idx}_pcd.ply')
+                print(f"Exporting aligned chunk {chunk_idx} PLY to {ply_path}")
+                save_confident_pointcloud_batch(
+                    points=points,              # shape: (H, W, 3)
+                    colors=colors,              # shape: (H, W, 3)
+                    confs=confs,          # shape: (H, W)
+                    output_path=ply_path,
+                    conf_threshold=np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef'],
+                    sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio']
+                )
+
+            # Export the last chunk as well
+            last_idx = len(self.chunk_indices) - 1
+            last_aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{last_idx}.npy")
+            if os.path.exists(last_aligned_path):
+                last_chunk_data = np.load(last_aligned_path, allow_pickle=True).item()
+            else:
+                last_chunk_data = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{last_idx}.npy"), allow_pickle=True).item()
+            points = last_chunk_data['points'].reshape(-1, 3)
+            colors = (last_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+            confs = last_chunk_data['conf'].reshape(-1)
+            last_ply_path = os.path.join(self.pcd_dir, f'{last_idx}_pcd.ply')
+            print(f"Exporting last aligned chunk {last_idx} PLY to {last_ply_path}")
+            save_confident_pointcloud_batch(
+                points=points,
+                colors=colors,
+                confs=confs,
+                output_path=last_ply_path,
                 conf_threshold=np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef'],
                 sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio']
             )
