@@ -21,3 +21,4 @@ trimesh
 opencv-python
 scipy
 matplotlib
+open3d
